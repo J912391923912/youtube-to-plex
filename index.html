@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>YouTube to Plex</title>
+<link rel="icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -119,6 +120,8 @@
   .account { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; color: var(--pencil); }
   .account .bad { color: var(--rec); font-weight: 600; }
   .warn { margin-top: 32px; padding: 16px 20px; border: 1px solid var(--rec); border-radius: 12px; background: var(--paper); max-width: 75ch; }
+  .warn.info { border-color: var(--rule); }
+  .warn .bar { margin-bottom: 0; }
   .warn p { margin: 0; }
   .warn p + p { margin-top: 10px; }
   .warn code { font: 0.875rem/1.4 var(--mono); background: var(--shell); padding: 2px 6px; border-radius: 4px; user-select: all; }
@@ -142,7 +145,7 @@
       <div class="account"><span id="acct-note" role="status"></span><button class="btn" id="acct" type="button" data-state="out">Sign in to YouTube</button></div>
     </div>
   </header>
-  <div class="warn" id="missing" hidden></div>
+  <div class="warn" id="setup" role="status" hidden></div>
 
   <main>
     <h1>Put a YouTube video on your Plex shelf.</h1>
@@ -214,9 +217,19 @@ $("#form").addEventListener("submit", async (e) => {
   catch (err) { $("#err").textContent = err.message; }
 });
 
+// video links open in your normal browser instead of inside this app window
+document.addEventListener("click", (e) => {
+  const a = e.target.closest('a[target="_blank"]');
+  if (!a) return;
+  e.preventDefault();
+  post("/api/open", { url: a.href }).catch(() => {});
+});
+// closing the window quits the app, so ask first while something is downloading
+addEventListener("beforeunload", (e) => { if (document.body.classList.contains("taping")) e.preventDefault(); });
+
 function jobState(j) {
   switch (j.state) {
-    case "queued": return "Waiting for the download before it";
+    case "queued": return setupBusy ? "Starts when setup is done" : "Waiting for the download before it";
     case "starting": return "Looking up the video";
     case "downloading": return `Downloading ${j.part} ${j.percent ?? 0}%`;
     case "merging": return "Joining picture and sound";
@@ -232,7 +245,7 @@ function jobBar(j) {
   return j.part === "sound" ? 90 + (j.percent ?? 0) / 10 : (j.percent ?? 0) * 0.9;
 }
 
-let lastJobs = "", lastLib = "";
+let lastJobs = "", lastLib = "", setupBusy = false;
 async function poll() {
   let state;
   try { state = await (await fetch("/api/state")).json(); } catch { return; }
@@ -247,12 +260,15 @@ async function poll() {
     note.classList.toggle("bad", !!acct.error);
   }
 
-  const missingKey = JSON.stringify(state.missing), warn = $("#missing");
-  if (warn.dataset.key !== missingKey) {
-    warn.dataset.key = missingKey;
-    warn.hidden = !state.missing.length;
-    warn.innerHTML = state.missing.map((m) => `<p><strong>${esc(m.name)} is missing</strong>, so ${esc(m.why)}.
-      Open PowerShell, run <code>${esc(m.cmd)}</code>, then start YouTube to Plex again.</p>`).join("");
+  const s = state.setup, setupKey = JSON.stringify(s), warn = $("#setup");
+  setupBusy = s.state === "installing";
+  if (warn.dataset.key !== setupKey) {
+    warn.dataset.key = setupKey;
+    warn.hidden = s.state === "ready" || (setupBusy && !s.tool);
+    warn.classList.toggle("info", setupBusy);
+    warn.innerHTML = s.state === "error" ? `<p>${esc(s.error)}</p>` : `
+      <p><strong>Getting ${esc(s.tool)} ready.</strong> This one-time download is ${s.percent ?? 0}% done, and your downloads start as soon as it finishes.</p>
+      <div class="bar"><i style="width:${s.percent ?? 0}%"></i></div>`;
   }
 
   const jobsKey = JSON.stringify(state.jobs);

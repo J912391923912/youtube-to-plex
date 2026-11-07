@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('index.html', '.')]
+datas = [('index.html', '.'), ('icon.ico', '.')]
 datas += collect_data_files('yt_dlp_ejs')
 
 

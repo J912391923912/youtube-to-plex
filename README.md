@@ -2,23 +2,21 @@
 
 Download YouTube videos straight into your Plex library. You get the sharpest picture the video has, up to 4K, with the best audio track, saved as MKV with a poster. It also suggests new videos from the channels and topics you download.
 
-Windows only. It runs on your own PC and opens in your browser.
+Windows only. It runs on your own PC in its own window.
 
 ## Get started
 
 1. Download `YouTube-to-Plex.exe` from [the latest release](../../releases/latest).
-2. Install ffmpeg and Deno once. Open PowerShell and run:
-   ```
-   winget install Gyan.FFmpeg
-   winget install DenoLand.Deno
-   ```
-   (Node.js works instead of Deno if you already have it.)
-3. Double-click `YouTube-to-Plex.exe`. It opens in your browser.
-4. Set **Saves to** to a folder your Plex server reads, paste a YouTube link and press the red button.
+2. Double-click it. It opens in its own window and adds itself to the Start menu.
+3. Set **Saves to** to a folder your Plex server reads, paste a YouTube link and press the red button.
 
-The exe is not code-signed, so Windows may say "Windows protected your PC". Choose **More info**, then **Run anyway**.
+On first start it downloads the two tools it needs, ffmpeg (joins picture and sound, about 86 MB) and Deno (lets YouTube give full quality, about 40 MB), from their official GitHub releases into `%LOCALAPPDATA%\YouTube to Plex\bin`. If you already have ffmpeg, Deno or Node.js installed, it uses yours.
 
-There is no window to close. Closing the browser tab is enough: the app stops by itself a few minutes later, once its downloads are done. Starting it again while it runs just opens the page.
+Close the window to quit. If something is still downloading, it asks first.
+
+### "Unknown publisher" and "Windows protected your PC"
+
+Windows shows these for any program that is not code-signed, and signing needs a paid certificate tied to a verified identity. The app is safe to run: the code is all here. Choose **More info**, then **Run anyway**. You only need to do this once. A copy you build yourself (see below) gets no warning.
 
 ## Set up Plex
 

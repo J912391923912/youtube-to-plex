@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 import webbrowser
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,10 +56,23 @@ YTDLP_ARGS = [
 CODECS = {"vp09": "VP9", "vp9": "VP9", "av01": "AV1", "avc1": "H.264", "hev1": "HEVC",
           "opus": "Opus", "mp4a": "AAC"}
 
+# (name, download, programs that already do the job, manual install command)
+TOOLS = [
+    ("ffmpeg", "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
+     ("ffmpeg",), "winget install Gyan.FFmpeg"),
+    ("Deno", "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
+     ("deno", "node"), "winget install DenoLand.Deno"),
+]
+BIN = DATA / "bin"
+BIN.mkdir(exist_ok=True)
+os.environ["PATH"] += os.pathsep + str(BIN)  # your own installs win, ours fill the gap
+
 jobs = []
 work = queue.Queue()
 account = {"state": "in" if COOKIES.exists() else "out"}
+setup = {"state": "installing", "tool": None, "percent": 0}
 last_seen = [time.time()]
+idle_limit = [float("inf")]
 
 
 def load_history():
@@ -68,13 +82,35 @@ def load_history():
         return []
 
 
-def missing_tools():
-    out = []
-    if not shutil.which("ffmpeg"):
-        out.append({"name": "ffmpeg", "why": "picture and sound cannot be joined", "cmd": "winget install Gyan.FFmpeg"})
-    if not (shutil.which("deno") or shutil.which("node")):
-        out.append({"name": "Deno", "why": "YouTube only offers low quality", "cmd": "winget install DenoLand.Deno"})
-    return out
+def install_missing():
+    """First run: fetch ffmpeg and Deno from their official GitHub releases into DATA/bin."""
+    for label, url, have, cmd in TOOLS:
+        if any(shutil.which(exe) for exe in have):
+            continue
+        setup.update(state="installing", tool=label, percent=0)
+        zip_path = BIN / f"{label}.zip"
+        try:
+            with urlopen(url, timeout=30) as r, open(zip_path, "wb") as f:
+                total, done = int(r.headers.get("Content-Length") or 0), 0
+                while chunk := r.read(1 << 20):
+                    f.write(chunk)
+                    done += len(chunk)
+                    setup["percent"] = round(100 * done / total) if total else None
+            with zipfile.ZipFile(zip_path) as z:
+                # programs last, so an interrupted unpack never leaves an exe without its DLLs
+                for m in sorted(z.infolist(), key=lambda m: m.filename.endswith(".exe")):
+                    name = Path(m.filename).name  # flat into BIN, so no path from the zip is ever used
+                    if name.endswith((".exe", ".dll")) and name != "ffplay.exe":
+                        with z.open(m) as src, open(BIN / f"{name}.part", "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        os.replace(BIN / f"{name}.part", BIN / name)
+        except Exception:
+            setup.update(state="error", error=f"Could not download {label}. Check the internet connection and start "
+                                              f"YouTube to Plex again, or install it yourself in PowerShell: {cmd}")
+            return
+        finally:
+            zip_path.unlink(missing_ok=True)
+    setup.update(state="ready", tool=None)
 
 
 def quality(info):
@@ -265,13 +301,41 @@ def sign_out():
     shutil.rmtree(PROFILE, ignore_errors=True)
 
 
-def quit_when_idle():
-    """No window to close, so the app stops itself a few minutes after its tab is closed and work is done."""
+def open_window():
+    """The page in its own app window (Chrome or Edge, no tabs or address bar). False if it had to use a tab."""
+    browser = next((b for b in BROWSERS if b.is_file()), None)
+    if not browser:
+        webbrowser.open(URL)
+        return False
+    subprocess.Popen([str(browser), f"--app={URL}", f"--user-data-dir={DATA / 'window'}", "--window-size=1120,900",
+                      "--no-first-run", "--no-default-browser-check",
+                      # keep the page checking in while minimized, so the app can tell open from closed
+                      "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
+                      "--disable-backgrounding-occluded-windows"])
+    return True
+
+
+def quit_when_closed():
+    """The page checks in every second. When it stops, its window was closed, so the app quits."""
     while True:
-        time.sleep(30)
-        busy = account["state"] == "waiting" or any(j["state"] not in ("done", "skipped", "error") for j in jobs)
-        if not busy and time.time() - last_seen[0] > 180:
-            os._exit(0)
+        time.sleep(5)
+        if time.time() - last_seen[0] > idle_limit[0]:
+            time.sleep(5)  # after sleep or hibernate the page needs a moment to check in again
+            if time.time() - last_seen[0] > idle_limit[0]:
+                if account["state"] == "waiting":
+                    close_browser()
+                os._exit(0)
+
+
+def add_to_start_menu():
+    """Lets the app be found in the Start menu. Refreshed on every start, so it follows the exe if it moves."""
+    if not getattr(sys, "frozen", False):
+        return
+    lnk = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{NAME}.lnk"
+    q = lambda p: str(p).replace("'", "''")  # PowerShell single-quote escaping
+    subprocess.Popen(["powershell", "-NoProfile", "-Command",
+                      f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{q(lnk)}');"
+                      f"$s.TargetPath='{q(sys.executable)}';$s.Save()"], creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -288,10 +352,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({"error": f"Open {NAME} at {URL}"}, 403)
         if self.path == "/":
             return self.reply((ASSETS / "index.html").read_bytes(), ctype="text/html; charset=utf-8")
+        if self.path == "/favicon.ico":
+            return self.reply((ASSETS / "icon.ico").read_bytes(), ctype="image/x-icon")
         if self.path == "/api/state":
             last_seen[0] = time.time()
             return self.reply({"jobs": jobs[::-1], "history": load_history()[::-1][:60], "default_dir": DEFAULT_DIR,
-                               "account": account, "missing": missing_tools()})
+                               "account": account, "setup": setup})
         if self.path == "/api/suggest":
             return self.reply(suggest())
         self.reply({"error": "Not found"}, 404)
@@ -300,13 +366,21 @@ class Handler(BaseHTTPRequestHandler):
         # JSON only: other websites cannot send that to localhost without a preflight we never answer
         if self.headers.get("Host") not in HOSTS or self.headers.get("Content-Type") != "application/json":
             return self.reply({"error": "Refused"}, 403)
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            assert isinstance(body, dict)
+        except Exception:
+            return self.reply({"error": "Bad request"}, 400)
         if self.path == "/api/signin":
             start_sign_in()
             return self.reply(account)
         if self.path == "/api/signout":
             sign_out()
             return self.reply(account)
+        if self.path == "/api/open":  # video links open in your normal browser, not in the app window
+            if str(body.get("url", "")).startswith("https://www.youtube.com/"):
+                webbrowser.open(body["url"])
+            return self.reply({})
         if self.path != "/api/download":
             return self.reply({"error": "Not found"}, 404)
         url = str(body.get("url", "")).strip()
@@ -327,12 +401,14 @@ def main():
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     except OSError:  # already running: just show it
-        webbrowser.open(URL)
+        open_window()
         return
-    threading.Thread(target=worker, daemon=True).start()
-    threading.Thread(target=quit_when_idle, daemon=True).start()
+    threading.Thread(target=lambda: (install_missing(), worker()), daemon=True).start()
     if "--no-browser" not in sys.argv:
-        webbrowser.open(URL)
+        # an app window reports in every second; a normal browser tab can be throttled to once a minute
+        idle_limit[0] = 30 if open_window() else 180
+        threading.Thread(target=quit_when_closed, daemon=True).start()
+        add_to_start_menu()
     server.serve_forever()
 
 
