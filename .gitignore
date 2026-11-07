@@ -1,0 +1,7 @@
+build/
+dist/
+__pycache__/
+cookies.txt
+history.json
+archive.txt
+log.txt

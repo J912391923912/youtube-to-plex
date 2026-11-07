@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube to Plex</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --shell: #DCDDD8;   /* deck plastic */
+    --paper: #F7F7F2;   /* tape label */
+    --ink: #1E2226;
+    --pencil: #50565D;
+    --hint: #666C73;
+    --rule: #B7B9B2;
+    --rec: #D7301F;
+    --rec-hover: #A3220F;
+    --tape: #5A3E2B;    /* magnetic tape */
+    --on-rec: #FFFFFF;
+    --shadow: rgba(30, 34, 38, 0.28);
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --shell: #1F2124; --paper: #2A2D31; --ink: #ECEDE8; --pencil: #A6ABB1; --hint: #8C9298;
+      --rule: #3C4045; --rec: #E2412F; --rec-hover: #F0604E; --tape: #C49A78; --shadow: rgba(0, 0, 0, 0.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html {
+    background: var(--shell); color: var(--ink);
+    font: 400 16px/1.5 "Familjen Grotesk", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    scrollbar-color: var(--pencil) var(--shell);
+  }
+  body { margin: 0; }
+  ::selection { background: var(--tape); color: var(--paper); }
+  :focus-visible { outline: 3px solid var(--tape); outline-offset: 3px; border-radius: 4px; }
+  a { color: inherit; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--ink); }
+
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 24px 20px 96px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 12px 24px; flex-wrap: wrap; }
+  .mark { font-weight: 700; font-size: 1.25rem; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+  .mark svg { width: 12px; height: 12px; fill: var(--rec); }
+  .folder { display: flex; align-items: baseline; gap: 10px; color: var(--pencil); font-size: 0.875rem; }
+  .folder input {
+    font: 0.8125rem/1.4 var(--mono); color: var(--ink); background: transparent;
+    border: 0; border-bottom: 1px solid var(--rule); padding: 4px 2px; width: min(380px, 62vw);
+  }
+  .folder input:focus { border-bottom-color: var(--ink); outline: none; }
+
+  h1 { font-size: clamp(2rem, 5.2vw, 3.5rem); line-height: 1.04; letter-spacing: -0.03em; font-weight: 700; margin: 64px 0 24px; max-width: 15ch; text-wrap: balance; }
+  .deck { display: flex; gap: 14px; align-items: center; }
+  .deck input {
+    flex: 1; min-width: 0; height: 76px; padding: 0 24px;
+    font: 500 1.125rem/1 var(--mono); color: var(--ink); caret-color: var(--rec);
+    background: var(--paper); border: 1px solid var(--ink); border-radius: 12px;
+  }
+  .deck input::placeholder { color: var(--hint); }
+  .rec {
+    flex: none; width: 76px; height: 76px; border-radius: 50%; border: 0; cursor: pointer;
+    background: var(--rec); color: var(--on-rec); display: grid; place-items: center;
+    box-shadow: 0 3px 8px var(--shadow);
+    transition: background-color 0.2s, transform 0.1s;
+  }
+  .rec:hover { background: var(--rec-hover); }
+  .rec:active { transform: translateY(1px); }
+  .rec svg { width: 30px; height: 30px; }
+  .hint { margin: 14px 0 0; color: var(--pencil); max-width: 70ch; }
+  .err { margin: 8px 0 0; min-height: 1.5em; color: var(--rec); font-weight: 600; }
+
+  /* The one moving thing: the record light blinks while something is being taped. */
+  body.taping .mark svg { animation: blink 1.6s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  @media (prefers-reduced-motion: reduce) { body.taping .mark svg { animation: none; } }
+
+  section { margin-top: 72px; }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--rule); padding-bottom: 12px; margin-bottom: 20px; }
+  h2 { font-size: 1.375rem; letter-spacing: -0.02em; font-weight: 600; margin: 0; }
+  .btn {
+    font: 600 0.9375rem/1 "Familjen Grotesk", system-ui, sans-serif; color: var(--ink);
+    background: none; border: 1px solid var(--ink); border-radius: 999px; padding: 10px 16px; min-height: 40px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+  .btn:disabled { color: var(--pencil); border-color: var(--rule); cursor: default; }
+  .empty { color: var(--pencil); max-width: 60ch; margin: 0; }
+
+  .job { display: grid; grid-template-columns: 112px 1fr; gap: 16px; align-items: center; padding: 10px 0; }
+  .thumb { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; background: var(--rule); display: block; }
+  .job > div { min-width: 0; }
+  .job .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 6px; background: var(--paper); border-radius: 3px; overflow: hidden; margin: 8px 0 6px; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--tape); transition: width 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
+  .job .s { font-size: 0.875rem; color: var(--pencil); font-variant-numeric: tabular-nums; }
+  .job.error .s { color: var(--rec); font-weight: 600; }
+  .job.done .bar i { background: var(--ink); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 32px 20px; }
+  .tile .frame { position: relative; display: block; }
+  .tile time {
+    position: absolute; right: 6px; bottom: 6px; padding: 2px 6px; border-radius: 4px;
+    background: rgba(30, 34, 38, 0.86); color: #F7F7F2; font: 500 0.75rem/1.4 var(--mono);
+  }
+  .tile h3 { font-size: 1rem; line-height: 1.3; font-weight: 600; margin: 12px 0 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tile h3 a { text-decoration: none; }
+  .tile h3 a:hover { text-decoration: underline; }
+  .tile p { margin: 0 0 12px; font-size: 0.875rem; color: var(--pencil); }
+
+  .row { display: grid; grid-template-columns: 6.5rem 1fr auto; gap: 4px 20px; padding: 12px 0; border-bottom: 1px solid var(--rule); align-items: baseline; }
+  .row:last-child { border-bottom: 0; }
+  .row .d, .row .q { font: 0.8125rem/1.5 var(--mono); color: var(--pencil); font-variant-numeric: tabular-nums; }
+  .row .q { text-align: right; }
+  .row .c { color: var(--pencil); font-size: 0.875rem; }
+
+  .tools { display: flex; align-items: center; gap: 12px 28px; flex-wrap: wrap; }
+  .account { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; color: var(--pencil); }
+  .account .bad { color: var(--rec); font-weight: 600; }
+  .warn { margin-top: 32px; padding: 16px 20px; border: 1px solid var(--rec); border-radius: 12px; background: var(--paper); max-width: 75ch; }
+  .warn p { margin: 0; }
+  .warn p + p { margin-top: 10px; }
+  .warn code { font: 0.875rem/1.4 var(--mono); background: var(--shell); padding: 2px 6px; border-radius: 4px; user-select: all; }
+
+  @media (max-width: 560px) {
+    h1 { margin-top: 44px; }
+    .deck input { height: 64px; padding: 0 16px; font-size: 1rem; }
+    .rec { width: 64px; height: 64px; }
+    .job { grid-template-columns: 84px 1fr; gap: 12px; }
+    .row { grid-template-columns: 1fr; }
+    .row .q { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="mark"><svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="6"/></svg>YouTube to Plex</div>
+    <div class="tools">
+      <label class="folder">Saves to <input id="folder" spellcheck="false" autocomplete="off"></label>
+      <div class="account"><span id="acct-note" role="status"></span><button class="btn" id="acct" type="button" data-state="out">Sign in to YouTube</button></div>
+    </div>
+  </header>
+  <div class="warn" id="missing" hidden></div>
+
+  <main>
+    <h1>Put a YouTube video on your Plex shelf.</h1>
+    <form id="form" novalidate>
+      <div class="deck">
+        <input id="url" type="url" placeholder="Paste a YouTube link" aria-label="YouTube link" autocomplete="off" spellcheck="false" autofocus>
+        <button class="rec" type="submit" aria-label="Download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>
+        </button>
+      </div>
+      <p class="hint">The sharpest picture the video has, up to 4K, with the best sound. Saved as MKV so Plex plays it.</p>
+      <p class="err" id="err" role="alert"></p>
+    </form>
+
+    <section id="jobs-section" hidden>
+      <div class="head"><h2>Downloading</h2></div>
+      <div id="jobs"></div>
+    </section>
+
+    <section>
+      <div class="head"><h2>Suggested for you</h2><button class="btn" id="refresh" type="button">Refresh</button></div>
+      <p class="empty" id="sug-note"></p>
+      <div class="grid" id="grid"></div>
+    </section>
+
+    <section>
+      <div class="head"><h2>In your library</h2></div>
+      <p class="empty" id="lib-note">Nothing downloaded yet. Paste a link above to start your shelf.</p>
+      <div id="library"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const thumb = (id) => `https://i.ytimg.com/vi/${encodeURIComponent(id)}/mqdefault.jpg`;
+const watch = (id) => `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+const clock = (sec) => {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = String(Math.floor(sec % 60)).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+};
+
+const folder = $("#folder");
+try { folder.value = localStorage.getItem("folder") || ""; } catch {}
+folder.addEventListener("change", () => { try { localStorage.setItem("folder", folder.value.trim()); } catch {} });
+
+async function post(path, data = {}) {
+  let res;
+  try {
+    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  } catch { throw new Error("YouTube to Plex is not running. Start it again, then reload this page."); }
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error);
+  poll();
+}
+const download = (url) => post("/api/download", { url, dir: folder.value.trim() });
+
+$("#acct").addEventListener("click", (e) => {
+  post(e.currentTarget.dataset.state === "out" ? "/api/signin" : "/api/signout").catch((err) => { $("#acct-note").textContent = err.message; });
+});
+
+$("#form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const url = $("#url").value.trim();
+  $("#err").textContent = "";
+  if (!url) { $("#err").textContent = "Paste a YouTube link first."; return; }
+  try { await download(url); $("#url").value = ""; }
+  catch (err) { $("#err").textContent = err.message; }
+});
+
+function jobState(j) {
+  switch (j.state) {
+    case "queued": return "Waiting for the download before it";
+    case "starting": return "Looking up the video";
+    case "downloading": return `Downloading ${j.part} ${j.percent ?? 0}%`;
+    case "merging": return "Joining picture and sound";
+    case "done": return `Saved in ${j.result}`;
+    case "skipped": return "Already in your library, skipped";
+    default: return j.error;
+  }
+}
+function jobBar(j) {
+  if (["done", "skipped", "merging"].includes(j.state)) return 100;
+  if (j.state !== "downloading") return 0;
+  // the picture is most of the file, the sound is the last stretch
+  return j.part === "sound" ? 90 + (j.percent ?? 0) / 10 : (j.percent ?? 0) * 0.9;
+}
+
+let lastJobs = "", lastLib = "";
+async function poll() {
+  let state;
+  try { state = await (await fetch("/api/state")).json(); } catch { return; }
+  if (!folder.value) folder.value = state.default_dir;
+  document.body.classList.toggle("taping", state.jobs.some((j) => !["done", "skipped", "error"].includes(j.state)));
+
+  const acct = state.account, btn = $("#acct"), note = $("#acct-note");
+  if (btn.dataset.state !== acct.state || note.dataset.error !== String(acct.error)) {
+    btn.dataset.state = acct.state; note.dataset.error = String(acct.error);
+    btn.textContent = { out: "Sign in to YouTube", waiting: "Cancel", in: "Sign out" }[acct.state];
+    note.textContent = acct.error || { out: "", waiting: "Sign in to Google in the window that opened.", in: "Signed in to YouTube" }[acct.state];
+    note.classList.toggle("bad", !!acct.error);
+  }
+
+  const missingKey = JSON.stringify(state.missing), warn = $("#missing");
+  if (warn.dataset.key !== missingKey) {
+    warn.dataset.key = missingKey;
+    warn.hidden = !state.missing.length;
+    warn.innerHTML = state.missing.map((m) => `<p><strong>${esc(m.name)} is missing</strong>, so ${esc(m.why)}.
+      Open PowerShell, run <code>${esc(m.cmd)}</code>, then start YouTube to Plex again.</p>`).join("");
+  }
+
+  const jobsKey = JSON.stringify(state.jobs);
+  if (jobsKey !== lastJobs) {
+    lastJobs = jobsKey;
+    $("#jobs-section").hidden = !state.jobs.length;
+    $("#jobs").innerHTML = state.jobs.map((j) => `
+      <div class="job ${esc(j.state)}">
+        ${j.vid ? `<img class="thumb" src="${thumb(j.vid)}" alt="">` : `<div class="thumb"></div>`}
+        <div>
+          <div class="t">${esc(j.title)}</div>
+          <div class="bar"><i style="width:${jobBar(j)}%"></i></div>
+          <div class="s">${esc(jobState(j))}</div>
+        </div>
+      </div>`).join("");
+  }
+
+  const libKey = JSON.stringify(state.history);
+  if (libKey !== lastLib) {
+    const firstEver = lastLib === "[]" && state.history.length > 0;
+    lastLib = libKey;
+    $("#lib-note").hidden = state.history.length > 0;
+    $("#library").innerHTML = state.history.map((h) => `
+      <div class="row">
+        <span class="d">${esc(h.when)}</span>
+        <span><a href="${watch(h.id)}" target="_blank" rel="noopener">${esc(h.title)}</a> <span class="c">${esc(h.channel)}</span></span>
+        <span class="q">${esc(h.quality)}</span>
+      </div>`).join("");
+    if (firstEver) loadSuggestions();  // the first download is what suggestions are built from
+  }
+}
+
+async function loadSuggestions() {
+  const btn = $("#refresh"), note = $("#sug-note");
+  btn.disabled = true; btn.textContent = "Searching";
+  note.hidden = false; note.textContent = "Looking through the channels and topics you download. This takes a few seconds.";
+  try {
+    const items = await (await fetch("/api/suggest")).json();
+    note.hidden = items.length > 0;
+    note.textContent = "Suggestions show up after your first download, picked from the same channels and topics.";
+    $("#grid").innerHTML = items.map((v) => `
+      <article class="tile">
+        <a class="frame" href="${watch(v.id)}" target="_blank" rel="noopener" tabindex="-1">
+          <img class="thumb" src="${thumb(v.id)}" alt="" loading="lazy">
+          ${v.duration ? `<time>${clock(v.duration)}</time>` : ""}
+        </a>
+        <h3><a href="${watch(v.id)}" target="_blank" rel="noopener">${esc(v.title)}</a></h3>
+        <p>${esc(v.reason)}${v.channel && !v.reason.includes(v.channel) ? `, ${esc(v.channel)}` : ""}</p>
+        <button class="btn" type="button" data-id="${esc(v.id)}">Download</button>
+      </article>`).join("");
+  } catch {
+    note.hidden = false; note.textContent = "Could not reach YouTube for suggestions. Check the connection, then refresh.";
+  } finally {
+    btn.disabled = false; btn.textContent = "Refresh";
+  }
+}
+
+$("#grid").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-id]");
+  if (!btn) return;
+  btn.disabled = true; btn.textContent = "Added to downloads";
+  try { await download(watch(btn.dataset.id)); }
+  catch (err) { btn.disabled = false; btn.textContent = "Try again"; $("#err").textContent = err.message; }
+});
+$("#refresh").addEventListener("click", loadSuggestions);
+
+poll();
+setInterval(poll, 1000);
+loadSuggestions();
+</script>
+</body>
+</html>
