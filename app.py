@@ -38,12 +38,11 @@ BROWSERS = [Path(os.environ.get(root, "-")) / exe
             for exe in (r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe")
             for root in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
 
-# Best picture up to 4K (60 fps when offered), VP9 before AV1 so more Plex clients play it
+# Best picture up to the chosen height (4K unless capped), 60 fps when offered, VP9 before AV1 so more Plex clients play it
 # without transcoding, best audio track (Opus), merged into MKV with chapters and metadata,
 # plus a .jpg next to the file that Plex uses as the poster.
 YTDLP_ARGS = [
     "-f", "bv*+ba/b",
-    "-S", "res:2160,fps,vcodec:vp9",
     "--merge-output-format", "mkv",
     "--embed-metadata", "--embed-chapters",
     "--write-thumbnail", "--convert-thumbnails", "jpg",
@@ -142,15 +141,34 @@ class Log:
         return re.sub(r"^(ERROR: )?(\[\w+\] [\w-]+: )?", "", msg)
 
 
+def free_bytes(folder):
+    p = Path(folder)
+    while not p.exists() and p != p.parent:  # the Saves to folder may not exist yet
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
+def remember(e):
+    history = load_history()
+    history.append({
+        "id": e["id"], "title": e.get("title"),
+        "channel": e.get("channel") or e.get("uploader"),
+        "channel_url": e.get("channel_url") or e.get("uploader_url"),
+        "tags": (e.get("tags") or [])[:15], "quality": quality(e),
+        "when": time.strftime("%Y-%m-%d"),
+    })
+    HISTORY.write_text(json.dumps(history, ensure_ascii=False, indent=1), "utf-8")
+
+
 def worker():
     while True:
         job = work.get()
-        job["state"] = "starting"
+        series = job["total"] > 1
 
         def on_progress(d):
             info = d["info_dict"]
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            job.update(vid=info.get("id"), title=info.get("title") or job["title"])
+            job.update(vid=info.get("id"), **{"ep" if series else "title": info.get("title") or job["title"]})
             if d["status"] == "downloading":
                 job.update(state="downloading",
                            part="picture" if info.get("vcodec") not in (None, "none") else "sound",
@@ -161,34 +179,67 @@ def worker():
                 job["state"] = "merging"
 
         log = Log()
-        signed_in = ["--cookies", str(COOKIES)] if COOKIES.exists() else []
-        opts = yt_dlp.parse_options(YTDLP_ARGS + signed_in + ["-P", job["dir"]]).ydl_opts
+        args = YTDLP_ARGS + ["-S", f"res:{job['max']},fps,vcodec:vp9", "-P", job["dir"]]
+        if COOKIES.exists():
+            args += ["--cookies", str(COOKIES)]
+        if series:  # a gentle pace keeps YouTube from blocking a long run
+            args += ["--sleep-interval", "3", "--max-sleep-interval", "10"]
+        opts = yt_dlp.parse_options(args).ydl_opts
         opts.update(progress_hooks=[on_progress], postprocessor_hooks=[on_postprocess], logger=log)
+        saved, ended = [], None
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(job["url"])
-            done = [e for e in (info.get("entries") or [info]) if e] if info else []
-            if not done:
-                if log.errors:
-                    job.update(state="error", error=log.errors[-1])
-                else:
-                    job["state"] = "skipped"
-                continue
-            history = load_history()
-            for e in done:
-                history.append({
-                    "id": e["id"], "title": e.get("title"),
-                    "channel": e.get("channel") or e.get("uploader"),
-                    "channel_url": e.get("channel_url") or e.get("uploader_url"),
-                    "tags": (e.get("tags") or [])[:15], "quality": quality(e),
-                    "when": time.strftime("%Y-%m-%d"),
-                })
-            HISTORY.write_text(json.dumps(history, ensure_ascii=False, indent=1), "utf-8")
-            result = quality(done[0]) if len(done) == 1 else f"{len(done)} videos"
-            job.update(state="done", vid=done[0]["id"], title=done[0].get("title"),
-                       result=result + (f", {len(log.errors)} could not be downloaded" if log.errors else ""))
+                for n, url in enumerate(job["urls"], 1):
+                    if job.get("stop"):
+                        ended = "stopped"
+                        break
+                    if free_bytes(job["dir"]) < 2e9:
+                        ended = "full"
+                        break
+                    job.update(state="starting", index=n, percent=None)
+                    info = ydl.extract_info(url)
+                    for e in [e for e in (info.get("entries") or [info]) if e] if info else []:
+                        remember(e)  # one at a time, so a long run that is cut off still counts what it saved
+                        saved.append(e)
         except Exception as err:  # keep the worker alive, show the reason on the page
-            job.update(state="error", error=Log.clean(str(err)))
+            log.errors.append(Log.clean(str(err)))
+        full = "The drive is full. Free up space or pick another Saves to folder, then start it again."
+        if not saved:
+            if ended == "full":
+                job.update(state="error", error=full)
+            elif ended == "stopped":
+                job["state"] = "stopped"
+            elif log.errors:
+                job.update(state="error", error=log.errors[-1])
+            else:
+                job["state"] = "skipped"
+            continue
+        result = quality(saved[0]) if not series and len(saved) == 1 else f"{len(saved)} video{'s' * (len(saved) != 1)}"
+        if log.errors:
+            result += f", {len(log.errors)} could not be downloaded"
+        result += {"stopped": ", then stopped as you asked", "full": ". " + full}.get(ended, "")
+        job.update(state="done", result=result, **({} if series else {"vid": saved[0]["id"], "title": saved[0].get("title")}))
+
+
+def series_info(url, folder):
+    """A playlist or channel: its episodes with views and length, so the page can pick and size them."""
+    if re.search(r"youtube\.com/(@[^/?]+|channel/[^/?]+|c/[^/?]+|user/[^/?]+)/?$", url):
+        url = url.rstrip("/") + "/videos"  # a channel's own page lists its tabs, not its videos
+    log = Log()
+    opts = yt_dlp.parse_options(["--flat-playlist", "--js-runtimes", "node"]).ydl_opts
+    opts["logger"] = log
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entries = [{"id": e["id"], "title": e.get("title"), "duration": e.get("duration") or 0, "views": e.get("view_count") or 0}
+               for e in (info or {}).get("entries") or [] if e.get("id") and e.get("duration")]
+    if not entries:
+        raise ValueError(log.errors[-1] if log.errors else "That link has no videos to download.")
+    try:
+        free = free_bytes(folder or DEFAULT_DIR)
+    except OSError:
+        free = None
+    return {"title": info.get("title"), "channel": info.get("channel") or info.get("uploader"),
+            "entries": entries, "free": free}
 
 
 def flat(source, n):
@@ -356,7 +407,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply((ASSETS / "icon.ico").read_bytes(), ctype="image/x-icon")
         if self.path == "/api/state":
             last_seen[0] = time.time()
-            return self.reply({"jobs": jobs[::-1], "history": load_history()[::-1][:60], "default_dir": DEFAULT_DIR,
+            return self.reply({"jobs": [{k: v for k, v in j.items() if k != "urls"} for j in jobs[::-1]],
+                               "history": load_history()[::-1][:60], "default_dir": DEFAULT_DIR,
                                "account": account, "setup": setup})
         if self.path == "/api/suggest":
             return self.reply(suggest())
@@ -381,16 +433,32 @@ class Handler(BaseHTTPRequestHandler):
             if str(body.get("url", "")).startswith("https://www.youtube.com/"):
                 webbrowser.open(body["url"])
             return self.reply({})
+        if self.path == "/api/series":
+            try:
+                return self.reply(series_info(str(body.get("url", "")).strip(), str(body.get("dir", "")).strip()))
+            except Exception as err:
+                return self.reply({"error": "Could not read that playlist: " + Log.clean(str(err))}, 400)
+        if self.path == "/api/stop":  # finishes the episode it is on, then stops
+            for job in jobs:
+                if job["id"] == body.get("id"):
+                    job["stop"] = True
+            return self.reply({})
         if self.path != "/api/download":
             return self.reply({"error": "Not found"}, 404)
-        url = str(body.get("url", "")).strip()
-        if not url.startswith(("https://", "http://")):
-            return self.reply({"error": "That is not a link. Copy the address from YouTube and paste it here."}, 400)
-        job = {"id": uuid.uuid4().hex, "url": url, "dir": str(body.get("dir") or DEFAULT_DIR).strip(),
-               "state": "queued", "title": url}
+        top = body.get("max") if body.get("max") in (2160, 1080, 720) else 2160
+        ids = [i for i in body.get("ids") or [] if isinstance(i, str) and re.fullmatch(r"[\w-]{11}", i)]
+        if ids:  # episodes picked from a playlist
+            urls, title = [f"https://www.youtube.com/watch?v={i}" for i in ids], str(body.get("title") or "Playlist")
+        else:
+            url = str(body.get("url", "")).strip()
+            if not url.startswith(("https://", "http://")):
+                return self.reply({"error": "That is not a link. Copy the address from YouTube and paste it here."}, 400)
+            urls, title = [url], url
+        job = {"id": uuid.uuid4().hex, "urls": urls, "total": len(urls), "max": top, "title": title,
+               "dir": str(body.get("dir") or DEFAULT_DIR).strip(), "state": "queued"}
         jobs.append(job)
         work.put(job)
-        self.reply(job)
+        self.reply({k: v for k, v in job.items() if k != "urls"})
 
     def log_message(self, *args):
         pass

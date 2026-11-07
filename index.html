@@ -124,6 +124,24 @@
   .warn .bar { margin-bottom: 0; }
   .warn p { margin: 0; }
   .warn p + p { margin-top: 10px; }
+  .series { margin-top: 8px; padding: 24px; background: var(--paper); border: 1px solid var(--rule); border-radius: 12px; }
+  .series h2 { font-size: 1.375rem; letter-spacing: -0.02em; font-weight: 600; margin: 0; }
+  .series .meta { margin: 4px 0 20px; color: var(--pencil); }
+  .series.loading .pick, .series.loading .size, .series.loading .actions { display: none; }
+  .pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }
+  .pick label { display: flex; flex-direction: column; gap: 6px; font-size: 0.875rem; font-weight: 500; color: var(--pencil); }
+  .pick input, .pick select {
+    font: 500 1rem/1 "Familjen Grotesk", system-ui, sans-serif; color: var(--ink); background: var(--shell);
+    border: 1px solid var(--rule); border-radius: 8px; height: 46px; padding: 0 12px; font-variant-numeric: tabular-nums;
+  }
+  .pick input:focus, .pick select:focus { border-color: var(--ink); outline: none; }
+  .series .size { margin: 20px 0 16px; font-variant-numeric: tabular-nums; }
+  .series .size.bad { color: var(--rec); font-weight: 600; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn.primary { background: var(--rec); border-color: var(--rec); color: var(--on-rec); }
+  .btn.primary:hover:not(:disabled) { background: var(--rec-hover); border-color: var(--rec-hover); color: var(--on-rec); }
+  .btn.quiet { border-color: transparent; }
+  .job:not(.error) .s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .warn code { font: 0.875rem/1.4 var(--mono); background: var(--shell); padding: 2px 6px; border-radius: 4px; user-select: all; }
 
   @media (max-width: 560px) {
@@ -156,12 +174,32 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>
         </button>
       </div>
-      <p class="hint">The sharpest picture the video has, up to 4K, with the best sound. Saved as MKV so Plex plays it.</p>
+      <p class="hint">Paste a video, playlist or channel link. You get the sharpest picture up to 4K and the best sound, saved as MKV for Plex.</p>
       <p class="err" id="err" role="alert"></p>
     </form>
 
+    <div class="series loading" id="series" role="region" aria-labelledby="series-title" hidden>
+      <h2 id="series-title"></h2>
+      <p class="meta" id="series-meta"></p>
+      <div class="pick">
+        <label>How many episodes <input id="s-count" type="number" min="1" inputmode="numeric"></label>
+        <label>Which ones
+          <select id="s-order"><option value="views">Most viewed</option><option value="random">Random</option><option value="list">Playlist order</option></select>
+        </label>
+        <label>Quality
+          <select id="s-max"><option value="1080">Up to 1080p</option><option value="720">Up to 720p</option><option value="2160">Best, up to 4K</option></select>
+        </label>
+      </div>
+      <p class="size" id="s-size" aria-live="polite"></p>
+      <div class="actions">
+        <button class="btn primary" id="s-go" type="button">Download</button>
+        <button class="btn" id="s-one" type="button" hidden>Only the video I pasted</button>
+        <button class="btn quiet" id="s-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+
     <section id="jobs-section" hidden>
-      <div class="head"><h2>Downloading</h2></div>
+      <div class="head"><h2>Downloading</h2><button class="btn" id="stop" type="button" hidden>Stop after this episode</button></div>
       <div id="jobs"></div>
     </section>
 
@@ -201,8 +239,76 @@ async function post(path, data = {}) {
   const body = await res.json();
   if (!res.ok) throw new Error(body.error);
   poll();
+  return body;
 }
 const download = (url) => post("/api/download", { url, dir: folder.value.trim() });
+
+// Playlists and channels: pick how many episodes, which ones and the quality, and see the size first.
+const GB_PER_HOUR = { 2160: 3.9, 1080: 0.55, 720: 0.35 };  // measured on real downloads; 4K varies the most
+const isSeries = (url) => /[?&]list=|youtube\.com\/(playlist|@|channel\/|c\/|user\/)/.test(url);
+const shuffle = (list) => {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+};
+const size = (gb) => gb >= 1000 ? `${(gb / 1000).toFixed(1)} TB` : `${Math.max(1, Math.round(gb))} GB`;
+let series = null;
+
+async function openSeries(url) {
+  const panel = $("#series");
+  panel.hidden = false; panel.classList.add("loading");
+  $("#series-title").textContent = "Reading the playlist";
+  $("#series-meta").textContent = "Big playlists take a few seconds.";
+  try { series = await post("/api/series", { url, dir: folder.value.trim() }); }
+  catch (err) { panel.hidden = true; $("#err").textContent = err.message; return; }
+  series.url = url;
+  series.shuffled = shuffle(series.entries);
+  series.popular = [...series.entries].sort((a, b) => b.views - a.views);
+  const hours = series.entries.reduce((t, e) => t + e.duration, 0) / 3600;
+  $("#series-title").textContent = series.title || "Playlist";
+  $("#series-meta").textContent = `${series.entries.length} episodes, ${Math.round(hours)} hours${series.channel ? `, from ${series.channel}` : ""}`;
+  $("#s-count").max = series.entries.length;
+  $("#s-count").value = series.entries.length;
+  $("#s-one").hidden = !/[?&]v=/.test(url);
+  panel.classList.remove("loading");
+  updateSeries();
+  $("#s-count").focus();
+}
+
+function chosen() {
+  const n = Math.min(Math.max(parseInt($("#s-count").value, 10) || 1, 1), series.entries.length);
+  const order = $("#s-order").value;
+  return (order === "views" ? series.popular : order === "random" ? series.shuffled : series.entries).slice(0, n);
+}
+
+function updateSeries() {
+  const pick = chosen(), max = $("#s-max").value;
+  const hours = pick.reduce((t, e) => t + e.duration, 0) / 3600, gb = hours * GB_PER_HOUR[max];
+  const free = series.free == null ? null : series.free / 1e9;
+  let text = `${max === "2160" ? "Up to about" : "About"} ${size(gb)} for ${pick.length} episode${pick.length === 1 ? "" : "s"}, ${Math.round(hours)} hours.`;
+  if (free != null) text += gb > free ? ` That is more than the ${size(free)} free where Saves to points.` : ` The Saves to drive has ${size(free)} free.`;
+  $("#s-size").textContent = text;
+  $("#s-size").classList.toggle("bad", free != null && gb > free);
+  $("#s-go").textContent = `Download ${pick.length} episode${pick.length === 1 ? "" : "s"}`;
+}
+["#s-count", "#s-order", "#s-max"].forEach((s) => $(s).addEventListener("input", updateSeries));
+
+$("#s-go").addEventListener("click", async () => {
+  const pick = chosen();
+  try {
+    await post("/api/download", { ids: pick.map((e) => e.id), title: series.title, max: Number($("#s-max").value), dir: folder.value.trim() });
+    $("#series").hidden = true; $("#url").value = "";
+  } catch (err) { $("#s-size").textContent = err.message; }
+});
+$("#s-one").addEventListener("click", async () => {
+  try { await download(series.url); $("#series").hidden = true; $("#url").value = ""; }
+  catch (err) { $("#s-size").textContent = err.message; }
+});
+$("#s-cancel").addEventListener("click", () => { $("#series").hidden = true; $("#url").focus(); });
+$("#stop").addEventListener("click", (e) => {
+  e.currentTarget.disabled = true;
+  post("/api/stop", { id: e.currentTarget.dataset.id }).catch(() => {});
+});
 
 $("#acct").addEventListener("click", (e) => {
   post(e.currentTarget.dataset.state === "out" ? "/api/signin" : "/api/signout").catch((err) => { $("#acct-note").textContent = err.message; });
@@ -213,6 +319,7 @@ $("#form").addEventListener("submit", async (e) => {
   const url = $("#url").value.trim();
   $("#err").textContent = "";
   if (!url) { $("#err").textContent = "Paste a YouTube link first."; return; }
+  if (isSeries(url)) return openSeries(url);
   try { await download(url); $("#url").value = ""; }
   catch (err) { $("#err").textContent = err.message; }
 });
@@ -227,22 +334,27 @@ document.addEventListener("click", (e) => {
 // closing the window quits the app, so ask first while something is downloading
 addEventListener("beforeunload", (e) => { if (document.body.classList.contains("taping")) e.preventDefault(); });
 
+const ENDED = ["done", "skipped", "error", "stopped"];
+const running = (j) => !ENDED.includes(j.state) && j.state !== "queued";
 function jobState(j) {
+  const ep = j.total > 1 && running(j) ? `Episode ${j.index} of ${j.total}${j.ep ? `, ${j.ep}` : ""}. ` : "";
   switch (j.state) {
     case "queued": return setupBusy ? "Starts when setup is done" : "Waiting for the download before it";
-    case "starting": return "Looking up the video";
-    case "downloading": return `Downloading ${j.part} ${j.percent ?? 0}%`;
-    case "merging": return "Joining picture and sound";
-    case "done": return `Saved in ${j.result}`;
+    case "starting": return ep + "Looking up the video";
+    case "downloading": return ep + `Downloading ${j.part} ${j.percent ?? 0}%`;
+    case "merging": return ep + "Joining picture and sound";
+    case "done": return `Saved ${j.total > 1 ? "" : "in "}${j.result}`;
     case "skipped": return "Already in your library, skipped";
+    case "stopped": return "Stopped before anything new was saved";
     default: return j.error;
   }
 }
 function jobBar(j) {
-  if (["done", "skipped", "merging"].includes(j.state)) return 100;
-  if (j.state !== "downloading") return 0;
+  let one = 0;
+  if (["done", "skipped", "merging"].includes(j.state)) one = 100;
   // the picture is most of the file, the sound is the last stretch
-  return j.part === "sound" ? 90 + (j.percent ?? 0) / 10 : (j.percent ?? 0) * 0.9;
+  else if (j.state === "downloading") one = j.part === "sound" ? 90 + (j.percent ?? 0) / 10 : (j.percent ?? 0) * 0.9;
+  return j.total > 1 && running(j) ? ((j.index || 1) - 1 + one / 100) / j.total * 100 : one;
 }
 
 let lastJobs = "", lastLib = "", setupBusy = false;
@@ -250,7 +362,13 @@ async function poll() {
   let state;
   try { state = await (await fetch("/api/state")).json(); } catch { return; }
   if (!folder.value) folder.value = state.default_dir;
-  document.body.classList.toggle("taping", state.jobs.some((j) => !["done", "skipped", "error"].includes(j.state)));
+  document.body.classList.toggle("taping", state.jobs.some((j) => !ENDED.includes(j.state)));
+  const run = state.jobs.find((j) => j.total > 1 && running(j)), stop = $("#stop");
+  stop.hidden = !run;
+  if (run && stop.dataset.key !== run.id + !!run.stop) {
+    stop.dataset.key = run.id + !!run.stop; stop.dataset.id = run.id; stop.disabled = !!run.stop;
+    stop.textContent = run.stop ? "Stopping after this episode" : "Stop after this episode";
+  }
 
   const acct = state.account, btn = $("#acct"), note = $("#acct-note");
   if (btn.dataset.state !== acct.state || note.dataset.error !== String(acct.error)) {

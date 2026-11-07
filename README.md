@@ -27,10 +27,20 @@ Videos are saved as `Channel/2026-11-07 Title [id].mkv`, with a `.jpg` poster ne
 
 ## Quality
 
-- Picture: the highest resolution the video has, up to 2160p, 60 fps when offered. VP9 is picked over AV1 because more Plex clients play it without transcoding.
+- Picture: the highest resolution the video has, up to 2160p (or the cap you pick for a playlist), 60 fps when offered. VP9 is picked over AV1 because more Plex clients play it without transcoding.
 - Sound: the best audio track YouTube offers, usually Opus at about 130 to 160 kbps.
 - A video that only exists below 720p is saved at its best.
 - A video you already downloaded is skipped.
+
+## Playlists and channels
+
+Paste a playlist or channel link and a panel opens before anything downloads. Pick how many episodes, which ones (most viewed, random or playlist order) and the quality (up to 1080p, up to 720p or best up to 4K). It shows the size up front, and warns when that is more than the free space where **Saves to** points.
+
+- Long runs wait a few seconds between episodes so YouTube does not block them.
+- **Stop after this episode** ends a run cleanly. Paste the link again later and it skips what you already have.
+- It stops by itself when the drive gets within 2 GB of full.
+
+As an example, the 150 most viewed episodes of a 90-minute show come to about 125 GB at 1080p.
 
 ## Sign in to YouTube
 
