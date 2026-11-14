@@ -1,5 +1,6 @@
 """YouTube to Plex: a small local page that downloads YouTube videos for Plex and suggests more."""
 import collections
+import ctypes
 import json
 import os
 import queue
@@ -15,10 +16,11 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
-import yt_dlp
 from websockets.sync.client import connect
+
+# yt_dlp is imported in main(), after update_ytdlp() has put the newest copy first in line
 
 NAME = "YouTube to Plex"
 ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # inside the .exe or next to app.py
@@ -39,14 +41,20 @@ BROWSERS = [Path(os.environ.get(root, "-")) / exe
             for root in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
 
 # Best picture up to the chosen height (4K unless capped), 60 fps when offered, VP9 before AV1 so more Plex clients play it
-# without transcoding, best audio track (Opus), merged into MKV with chapters and metadata,
-# plus a .jpg next to the file that Plex uses as the poster.
+# without transcoding, and the original-language audio track (Opus). Saved as MP4, because that is the container Plex
+# reads embedded title, date and description from (it ignores them in MKV). Captions, chapters and stream languages
+# are embedded too, and a .jpg next to the file is the poster.
+ARCHIVE = DATA / "archive.txt"
+YTDLP = DATA / "yt-dlp.zip"  # yt-dlp's newest release, used instead of the copy inside the exe
+YTDLP_REPO = "https://github.com/yt-dlp/yt-dlp"
 YTDLP_ARGS = [
     "-f", "bv*+ba/b",
-    "--merge-output-format", "mkv",
+    "--merge-output-format", "mp4",
     "--embed-metadata", "--embed-chapters",
+    "--write-subs", "--write-auto-subs", "--embed-subs", "--sleep-subtitles", "1",
     "--write-thumbnail", "--convert-thumbnails", "jpg",
-    "--download-archive", str(DATA / "archive.txt"),
+    "--download-archive", str(ARCHIVE),
+    "--ignore-errors",  # a caption that fails to download is a warning, the video still saves
     "-o", "%(channel,uploader)s/%(upload_date>%Y-%m-%d)s %(title)s [%(id)s].%(ext)s",
     "--no-playlist",  # a watch link inside a playlist gets that one video
     "--js-runtimes", "node",  # Deno is used by default, Node when that is what is installed
@@ -112,6 +120,31 @@ def install_missing():
     setup.update(state="ready", tool=None)
 
 
+def update_ytdlp():
+    """YouTube changes often and yt-dlp keeps up. Each start fetches yt-dlp's newest release (about 3 MB, only when
+    there is a new one) and loads it instead of the copy inside the exe, so downloads keep working without a new
+    version of this app. Offline, it keeps the last one it got."""
+    try:
+        with zipfile.ZipFile(YTDLP) as z:
+            have = re.search(r"__version__ = '([^']+)'", z.read("yt_dlp/version.py").decode())[1]
+    except Exception:
+        have = None
+    try:
+        with urlopen(Request(f"{YTDLP_REPO}/releases/latest", method="HEAD"), timeout=5) as r:
+            latest = r.url.rsplit("/", 1)[1]  # it redirects to .../releases/tag/2026.10.26
+        if latest != have:
+            part = YTDLP.with_suffix(".part")
+            with urlopen(f"{YTDLP_REPO}/releases/download/{latest}/yt-dlp", timeout=60) as r:
+                part.write_bytes(r.read())
+            with zipfile.ZipFile(part) as z:  # whole and the version it claims, or it is not used
+                assert z.testzip() is None and f"'{latest}'" in z.read("yt_dlp/version.py").decode()
+            os.replace(part, YTDLP)
+    except Exception:
+        pass
+    if YTDLP.is_file():  # ponytail: assumes yt-dlp still runs on the exe's Python (3.13, until about 2029); rebuild before
+        sys.path.insert(0, str(YTDLP))
+
+
 def quality(info):
     fmts = info.get("requested_formats") or [info]
     v = next((f for f in fmts if f.get("vcodec") not in (None, "none")), {})
@@ -148,6 +181,20 @@ def free_bytes(folder):
     return shutil.disk_usage(p).free
 
 
+def have_ids():
+    """Every video ever downloaded, from yt-dlp's archive (lines like "youtube dQw4w9WgXcQ")."""
+    try:
+        return {line.split()[1] for line in ARCHIVE.read_text("utf-8").splitlines() if line.startswith("youtube ")}
+    except FileNotFoundError:
+        return set()
+
+
+def sub_langs(info):
+    """Captions in the video's own language plus English. yt-dlp takes manual captions over automatic ones."""
+    own = (info.get("language") or "en").split("-")[0]
+    return list(dict.fromkeys([own, "en"]))
+
+
 def remember(e):
     history = load_history()
     history.append({
@@ -161,8 +208,13 @@ def remember(e):
 
 
 def worker():
+    # ES_CONTINUOUS (+ ES_SYSTEM_REQUIRED): Windows does not sleep until the queue is empty. The screen can turn off.
+    stay_awake = lambda on: ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | on)
     while True:
+        if work.empty():
+            stay_awake(False)
         job = work.get()
+        stay_awake(True)
         series = job["total"] > 1
 
         def on_progress(d):
@@ -186,37 +238,60 @@ def worker():
             args += ["--sleep-interval", "3", "--max-sleep-interval", "10"]
         opts = yt_dlp.parse_options(args).ydl_opts
         opts.update(progress_hooks=[on_progress], postprocessor_hooks=[on_postprocess], logger=log)
-        saved, ended = [], None
+        saved, failed, skipped, ended = [], [], 0, None
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 for n, url in enumerate(job["urls"], 1):
                     if job.get("stop"):
                         ended = "stopped"
                         break
-                    if free_bytes(job["dir"]) < 2e9:
-                        ended = "full"
-                        break
-                    job.update(state="starting", index=n, percent=None)
-                    info = ydl.extract_info(url)
-                    for e in [e for e in (info.get("entries") or [info]) if e] if info else []:
-                        remember(e)  # one at a time, so a long run that is cut off still counts what it saved
-                        saved.append(e)
+                    try:
+                        if free_bytes(job["dir"]) < 2e9:
+                            ended = "full"
+                            break
+                        job.update(state="starting", index=n, percent=None)
+                        errors = len(log.errors)
+                        info = ydl.extract_info(url, download=False)
+                        if info and info.get("entries") is not None:
+                            log.errors.append("That is a playlist. Paste it in the link box to pick its episodes.")
+                            info = None
+                        elif info and ydl.in_download_archive(info):
+                            skipped += 1
+                            continue
+                        elif info:
+                            ydl.params["subtitleslangs"] = sub_langs(info)
+                            info = ydl.process_ie_result(info, download=True)
+                        if not info and len(log.errors) == errors:
+                            skipped += 1  # yt-dlp quietly returns nothing for a video already in its archive
+                            continue
+                        if not info or len(log.errors) > errors:
+                            failed.append(url)
+                            continue
+                        remember(info)  # one at a time, so a long run that is cut off still counts what it saved
+                        saved.append(info)
+                    except Exception as err:  # one broken video never ends the run
+                        log.errors.append(Log.clean(str(err)))
+                        failed.append(url)
         except Exception as err:  # keep the worker alive, show the reason on the page
             log.errors.append(Log.clean(str(err)))
         full = "The drive is full. Free up space or pick another Saves to folder, then start it again."
+        job.update(failed=failed, error=log.errors[-1] if log.errors else None)
         if not saved:
             if ended == "full":
                 job.update(state="error", error=full)
+            elif failed or log.errors:
+                job["state"] = "error"
             elif ended == "stopped":
                 job["state"] = "stopped"
-            elif log.errors:
-                job.update(state="error", error=log.errors[-1])
             else:
                 job["state"] = "skipped"
             continue
-        result = quality(saved[0]) if not series and len(saved) == 1 else f"{len(saved)} video{'s' * (len(saved) != 1)}"
-        if log.errors:
-            result += f", {len(log.errors)} could not be downloaded"
+        count = f"{len(saved)} video" + ("s" if len(saved) != 1 else "")
+        result = quality(saved[0]) if not series and len(saved) == 1 else count
+        if skipped:
+            result += f", {skipped} you already had"
+        if failed:
+            result += f", {len(failed)} failed"
         result += {"stopped": ", then stopped as you asked", "full": ". " + full}.get(ended, "")
         job.update(state="done", result=result, **({} if series else {"vid": saved[0]["id"], "title": saved[0].get("title")}))
 
@@ -230,7 +305,9 @@ def series_info(url, folder):
     opts["logger"] = log
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-    entries = [{"id": e["id"], "title": e.get("title"), "duration": e.get("duration") or 0, "views": e.get("view_count") or 0}
+    have = have_ids()
+    entries = [{"id": e["id"], "title": e.get("title"), "duration": e.get("duration") or 0,
+                "views": e.get("view_count") or 0, "have": e["id"] in have}
                for e in (info or {}).get("entries") or [] if e.get("id") and e.get("duration")]
     if not entries:
         raise ValueError(log.errors[-1] if log.errors else "That link has no videos to download.")
@@ -438,6 +515,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(series_info(str(body.get("url", "")).strip(), str(body.get("dir", "")).strip()))
             except Exception as err:
                 return self.reply({"error": "Could not read that playlist: " + Log.clean(str(err))}, 400)
+        if self.path == "/api/retry":  # the videos that failed, as a new run
+            old = next((j for j in jobs if j["id"] == body.get("id") and j.get("failed") and not j.get("retried")), None)
+            if not old:
+                return self.reply({"error": "Nothing to retry."}, 400)
+            old["retried"] = True
+            job = {"id": uuid.uuid4().hex, "urls": old["failed"], "total": len(old["failed"]), "max": old["max"],
+                   "title": old["title"], "dir": old["dir"], "state": "queued"}
+            jobs.append(job)
+            work.put(job)
+            return self.reply({})
         if self.path == "/api/stop":  # finishes the episode it is on, then stops
             for job in jobs:
                 if job["id"] == body.get("id"):
@@ -453,6 +540,10 @@ class Handler(BaseHTTPRequestHandler):
             url = str(body.get("url", "")).strip()
             if not url.startswith(("https://", "http://")):
                 return self.reply({"error": "That is not a link. Copy the address from YouTube and paste it here."}, 400)
+            vid = re.search(r"(?:[?&]v=|youtu\.be/|/shorts/|/live/)([\w-]{11})", url)
+            if vid and vid[1] in have_ids():
+                title = next((h["title"] for h in load_history() if h["id"] == vid[1]), None)
+                return self.reply({"have": title or "this video"})
             urls, title = [url], url
         job = {"id": uuid.uuid4().hex, "urls": urls, "total": len(urls), "max": top, "title": title,
                "dir": str(body.get("dir") or DEFAULT_DIR).strip(), "state": "queued"}
@@ -471,6 +562,10 @@ def main():
     except OSError:  # already running: just show it
         open_window()
         return
+    update_ytdlp()  # only here, past the port check, so a second start never swaps the copy in use
+    global yt_dlp
+    import yt_dlp
+    print("yt-dlp", yt_dlp.version.__version__, "from", yt_dlp.__file__)
     threading.Thread(target=lambda: (install_missing(), worker()), daemon=True).start()
     if "--no-browser" not in sys.argv:
         # an app window reports in every second; a normal browser tab can be throttled to once a minute

@@ -30,6 +30,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html {
     background: var(--shell); color: var(--ink);
     font: 400 16px/1.5 "Familjen Grotesk", system-ui, sans-serif;
@@ -141,6 +142,8 @@
   .btn.primary { background: var(--rec); border-color: var(--rec); color: var(--on-rec); }
   .btn.primary:hover:not(:disabled) { background: var(--rec-hover); border-color: var(--rec-hover); color: var(--on-rec); }
   .btn.quiet { border-color: transparent; }
+  .btn.small { min-height: 36px; padding: 8px 14px; font-size: 0.875rem; margin-top: 10px; }
+  .err.info { color: var(--pencil); font-weight: 500; }
   .job:not(.error) .s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .warn code { font: 0.875rem/1.4 var(--mono); background: var(--shell); padding: 2px 6px; border-radius: 4px; user-select: all; }
 
@@ -174,7 +177,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>
         </button>
       </div>
-      <p class="hint">Paste a video, playlist or channel link. You get the sharpest picture up to 4K and the best sound, saved as MKV for Plex.</p>
+      <p class="hint">Paste a video, playlist or channel link. You get the sharpest picture up to 4K, the best sound and captions, saved as MP4 for Plex.</p>
       <p class="err" id="err" role="alert"></p>
     </form>
 
@@ -262,13 +265,16 @@ async function openSeries(url) {
   try { series = await post("/api/series", { url, dir: folder.value.trim() }); }
   catch (err) { panel.hidden = true; $("#err").textContent = err.message; return; }
   series.url = url;
-  series.shuffled = shuffle(series.entries);
-  series.popular = [...series.entries].sort((a, b) => b.views - a.views);
-  const hours = series.entries.reduce((t, e) => t + e.duration, 0) / 3600;
+  series.fresh = series.entries.filter((e) => !e.have);
+  series.shuffled = shuffle(series.fresh);
+  series.popular = [...series.fresh].sort((a, b) => b.views - a.views);
+  const hours = series.entries.reduce((t, e) => t + e.duration, 0) / 3600, had = series.entries.length - series.fresh.length;
   $("#series-title").textContent = series.title || "Playlist";
-  $("#series-meta").textContent = `${series.entries.length} episodes, ${Math.round(hours)} hours${series.channel ? `, from ${series.channel}` : ""}`;
-  $("#s-count").max = series.entries.length;
-  $("#s-count").value = series.entries.length;
+  $("#series-meta").textContent = `${series.entries.length} episodes, ${Math.round(hours)} hours${series.channel ? `, from ${series.channel}` : ""}.`
+    + (had ? ` You already have ${had}, so ${had === 1 ? "it is" : "they are"} left out.` : "");
+  $("#s-count").max = series.fresh.length;
+  $("#s-count").value = series.fresh.length;
+  $("#series .pick").hidden = $("#s-go").hidden = !series.fresh.length;
   $("#s-one").hidden = !/[?&]v=/.test(url);
   panel.classList.remove("loading");
   updateSeries();
@@ -276,12 +282,13 @@ async function openSeries(url) {
 }
 
 function chosen() {
-  const n = Math.min(Math.max(parseInt($("#s-count").value, 10) || 1, 1), series.entries.length);
+  const n = Math.min(Math.max(parseInt($("#s-count").value, 10) || 1, 1), series.fresh.length);
   const order = $("#s-order").value;
-  return (order === "views" ? series.popular : order === "random" ? series.shuffled : series.entries).slice(0, n);
+  return (order === "views" ? series.popular : order === "random" ? series.shuffled : series.fresh).slice(0, n);
 }
 
 function updateSeries() {
+  if (!series.fresh.length) { $("#s-size").textContent = "You already have every episode."; $("#s-size").classList.remove("bad"); return; }
   const pick = chosen(), max = $("#s-max").value;
   const hours = pick.reduce((t, e) => t + e.duration, 0) / 3600, gb = hours * GB_PER_HOUR[max];
   const free = series.free == null ? null : series.free / 1e9;
@@ -317,11 +324,14 @@ $("#acct").addEventListener("click", (e) => {
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const url = $("#url").value.trim();
-  $("#err").textContent = "";
+  $("#err").textContent = ""; $("#err").classList.remove("info");
   if (!url) { $("#err").textContent = "Paste a YouTube link first."; return; }
   if (isSeries(url)) return openSeries(url);
-  try { await download(url); $("#url").value = ""; }
-  catch (err) { $("#err").textContent = err.message; }
+  try {
+    const r = await download(url);
+    $("#url").value = "";
+    if (r.have) { $("#err").textContent = `You already have ${r.have}. It is in your library below.`; $("#err").classList.add("info"); }
+  } catch (err) { $("#err").textContent = err.message; }
 });
 
 // video links open in your normal browser instead of inside this app window
@@ -357,7 +367,14 @@ function jobBar(j) {
   return j.total > 1 && running(j) ? ((j.index || 1) - 1 + one / 100) / j.total * 100 : one;
 }
 
-let lastJobs = "", lastLib = "", setupBusy = false;
+let lastLib = "", setupBusy = false;
+const rows = new Map();
+$("#jobs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-retry]");
+  if (!b) return;
+  b.disabled = true;
+  post("/api/retry", { id: b.dataset.retry }).catch((err) => { b.disabled = false; $("#err").textContent = err.message; });
+});
 async function poll() {
   let state;
   try { state = await (await fetch("/api/state")).json(); } catch { return; }
@@ -389,20 +406,23 @@ async function poll() {
       <div class="bar"><i style="width:${s.percent ?? 0}%"></i></div>`;
   }
 
-  const jobsKey = JSON.stringify(state.jobs);
-  if (jobsKey !== lastJobs) {
-    lastJobs = jobsKey;
-    $("#jobs-section").hidden = !state.jobs.length;
-    $("#jobs").innerHTML = state.jobs.map((j) => `
-      <div class="job ${esc(j.state)}">
-        ${j.vid ? `<img class="thumb" src="${thumb(j.vid)}" alt="">` : `<div class="thumb"></div>`}
-        <div>
-          <div class="t">${esc(j.title)}</div>
-          <div class="bar"><i style="width:${jobBar(j)}%"></i></div>
-          <div class="s">${esc(jobState(j))}</div>
-        </div>
-      </div>`).join("");
-  }
+  $("#jobs-section").hidden = !state.jobs.length;
+  state.jobs.forEach((j, i) => {
+    let row = rows.get(j.id);
+    if (!row) rows.set(j.id, row = document.createElement("div"));
+    const failed = (j.failed || []).length, ended = ENDED.includes(j.state);
+    const why = ended && j.state !== "error" && failed && j.error ? `<div class="s why">Last problem: ${esc(j.error)}</div>` : "";
+    const retry = ended && failed && !j.retried ? `<button class="btn small" type="button" data-retry="${esc(j.id)}">${
+      failed === 1 ? "Try again" : `Try the ${failed} failed again`}</button>` : "";
+    const html = `${j.vid ? `<img class="thumb" src="${thumb(j.vid)}" alt="">` : `<div class="thumb"></div>`}
+      <div>
+        <div class="t">${esc(j.title)}</div>
+        <div class="bar"><i style="width:${jobBar(j)}%"></i></div>
+        <div class="s">${esc(jobState(j))}</div>${why}${retry}
+      </div>`;
+    if (row._html !== html) { row._html = html; row.innerHTML = html; row.className = `job ${j.state}`; }
+    if ($("#jobs").children[i] !== row) $("#jobs").insertBefore(row, $("#jobs").children[i] || null);
+  });
 
   const libKey = JSON.stringify(state.history);
   if (libKey !== lastLib) {

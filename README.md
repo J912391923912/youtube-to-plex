@@ -1,6 +1,6 @@
 # YouTube to Plex
 
-Download YouTube videos straight into your Plex library. You get the sharpest picture the video has, up to 4K, with the best audio track, saved as MKV with a poster. It also suggests new videos from the channels and topics you download.
+Download YouTube videos straight into your Plex library. You get the sharpest picture the video has, up to 4K, with the best audio track, saved as MP4 with a poster and captions. It also suggests new videos from the channels and topics you download.
 
 Windows only. It runs on your own PC in its own window.
 
@@ -22,23 +22,30 @@ Windows shows these for any program that is not code-signed, and signing needs a
 
 1. Add a library of type **Other Videos** that points to the Saves to folder.
 2. In the library's advanced settings, pick **Plex Personal Media** as the agent and turn on **Scan my library automatically**.
+3. In Plex's agent settings for Personal Media, tick **Local Media Assets** and put it at the top. That is what lets Plex read the title, date and description stored inside each file.
 
-Videos are saved as `Channel/2026-11-07 Title [id].mkv`, with a `.jpg` poster next to each one and the title, date, description and chapters inside the file.
+Videos are saved as `Channel/2026-11-07 Title [id].mp4`, with a `.jpg` poster next to each one. Inside the file: the title, upload date, channel, description, chapters, captions, and a language tag on the audio and captions.
+
+Plex works out 4K, HDR and the audio language from the file itself, so they show up without being in the file name.
 
 ## Quality
 
 - Picture: the highest resolution the video has, up to 2160p (or the cap you pick for a playlist), 60 fps when offered. VP9 is picked over AV1 because more Plex clients play it without transcoding.
-- Sound: the best audio track YouTube offers, usually Opus at about 130 to 160 kbps.
+- Sound: the best audio track YouTube offers in the video's original language, usually Opus at about 130 to 160 kbps. AI-dubbed tracks are skipped.
+- Captions: the video's own language plus English, embedded so Plex lists them as subtitles. Made-by-the-creator captions win over automatic ones.
+- Saved as MP4, because Plex reads embedded titles and descriptions from MP4 but not from MKV.
 - A video that only exists below 720p is saved at its best.
-- A video you already downloaded is skipped.
+- A video you already downloaded is skipped. Paste its link and the app tells you that you have it.
 
 ## Playlists and channels
 
-Paste a playlist or channel link and a panel opens before anything downloads. Pick how many episodes, which ones (most viewed, random or playlist order) and the quality (up to 1080p, up to 720p or best up to 4K). It shows the size up front, and warns when that is more than the free space where **Saves to** points.
+Paste a playlist or channel link (any channel, like `youtube.com/@CalebHammer`) and a panel opens before anything downloads. A channel link gets all its videos, without Shorts or live streams. Videos you already have are left out. Pick how many episodes, which ones (most viewed, random or playlist order) and the quality (up to 1080p, up to 720p or best up to 4K). It shows the size up front, and warns when that is more than the free space where **Saves to** points.
 
 - Long runs wait a few seconds between episodes so YouTube does not block them.
 - **Stop after this episode** ends a run cleanly. Paste the link again later and it skips what you already have.
 - It stops by itself when the drive gets within 2 GB of full.
+- Your PC does not go to sleep while something is downloading. The screen can still turn off.
+- When some videos fail, the run says how many and why, and **Try again** downloads just those.
 
 As an example, the 150 most viewed episodes of a 90-minute show come to about 125 GB at 1080p.
 
@@ -56,7 +63,7 @@ Suggestions come from the newest uploads of the channels you download from most,
 
 ## When downloads start failing
 
-YouTube changes often, and the downloader inside this app ([yt-dlp](https://github.com/yt-dlp/yt-dlp)) keeps up. Download the newest release. If you run from source, update with `python -m pip install -U "yt-dlp[default]"`.
+YouTube changes often, and the downloader inside this app ([yt-dlp](https://github.com/yt-dlp/yt-dlp)) keeps up. Each time the app starts, it checks GitHub for a new yt-dlp release, fetches it when there is one (about 3 MB) and uses it instead of the copy inside the exe. So when downloads start failing, close the app and open it again.
 
 Your history and the list of downloaded videos are in `%LOCALAPPDATA%\YouTube to Plex`.
 
