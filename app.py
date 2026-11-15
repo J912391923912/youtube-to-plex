@@ -1,9 +1,11 @@
 """YouTube to Plex: a small local page that downloads YouTube videos for Plex and suggests more."""
 import collections
 import ctypes
+import itertools
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -29,6 +31,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 if sys.stderr is None:  # the .exe has no console window, so keep yt-dlp's output in a file
     sys.stdout = sys.stderr = open(DATA / "log.txt", "w", encoding="utf-8", buffering=1)
 HISTORY = DATA / "history.json"
+FOLLOWS = DATA / "follows.json"  # channels whose new uploads download by themselves
 COOKIES = DATA / "cookies.txt"   # your YouTube sign-in, never leaves this PC
 PROFILE = DATA / "browser"       # the browser window you sign in with
 DEFAULT_DIR = str(Path.home() / "Videos" / "YouTube")
@@ -76,17 +79,30 @@ os.environ["PATH"] += os.pathsep + str(BIN)  # your own installs win, ours fill 
 
 jobs = []
 work = queue.Queue()
+ENDED = ("done", "skipped", "error", "stopped")
 account = {"state": "in" if COOKIES.exists() else "out"}
 setup = {"state": "installing", "tool": None, "percent": 0}
 last_seen = [time.time()]
 idle_limit = [float("inf")]
 
 
-def load_history():
+def load_json(path):
     try:
-        return json.loads(HISTORY.read_text("utf-8"))
+        return json.loads(path.read_text("utf-8"))
     except FileNotFoundError:
         return []
+
+
+def load_history():
+    return load_json(HISTORY)
+
+
+def add_job(urls, title, top, folder):
+    job = {"id": uuid.uuid4().hex, "urls": urls, "total": len(urls), "max": top, "title": title, "dir": folder,
+           "state": "queued"}
+    jobs.append(job)
+    work.put(job)
+    return job
 
 
 def install_missing():
@@ -298,6 +314,7 @@ def worker():
 
 def series_info(url, folder):
     """A playlist or channel: its episodes with views and length, so the page can pick and size them."""
+    channel = re.search(r"youtube\.com/(@[^/?]+|channel/[^/?]+|c/[^/?]+|user/[^/?]+)", url)
     if re.search(r"youtube\.com/(@[^/?]+|channel/[^/?]+|c/[^/?]+|user/[^/?]+)/?$", url):
         url = url.rstrip("/") + "/videos"  # a channel's own page lists its tabs, not its videos
     log = Log()
@@ -316,7 +333,8 @@ def series_info(url, folder):
     except OSError:
         free = None
     return {"title": info.get("title"), "channel": info.get("channel") or info.get("uploader"),
-            "entries": entries, "free": free}
+            "entries": entries, "free": free,
+            "follow": f"{info['channel_url']}/videos" if channel and info.get("channel_url") else None}
 
 
 def flat(source, n):
@@ -330,33 +348,43 @@ def flat(source, n):
 
 
 def pick(results, have, per_source=6):
-    """Videos not downloaded yet, no Shorts or live streams, at most per_source from each source."""
-    out, seen = [], set(have)
+    """Videos not downloaded yet, no Shorts or live streams, at most per_source from each source, sources in turns."""
+    seen, rows = set(have), []
     for reason, entries in results:
-        n = 0
+        row = []
         for e in entries:
             vid = e.get("id")
             if not vid or vid in seen or (e.get("duration") or 0) < 120:
                 continue
             seen.add(vid)
-            out.append({"id": vid, "title": e.get("title"), "duration": e.get("duration"),
+            row.append({"id": vid, "title": e.get("title"), "duration": e.get("duration"),
                         "channel": e.get("channel") or e.get("uploader"), "reason": reason})
-            n += 1
-            if n == per_source:
+            if len(row) == per_source:
                 break
-    return out
+        rows.append(row)
+    return [v for turn in itertools.zip_longest(*rows) for v in turn if v]
 
 
 def suggest():
     history = load_history()
-    channels = collections.Counter((h["channel"], h["channel_url"]) for h in history if h.get("channel_url"))
-    tags = collections.Counter(t.lower() for h in history[-30:] for t in h.get("tags") or [])
-    sources = [(f"{url}/videos", f"New from {name}", 12) for (name, url), _ in channels.most_common(4)]
-    if tags:
-        query = " ".join(t for t, _ in tags.most_common(3))
-        sources.append((f"ytsearch20:{query}", "Close to what you download", 20))
-    with ThreadPoolExecutor(5) as pool:
-        results = list(pool.map(lambda s: (s[1], flat(s[0], s[2])), sources))
+    known = {h.get("channel") for h in history}
+    # A channel gets one vote per day you downloaded from it, so a 150-episode run counts once, and ties go to the
+    # channel you used last. Four of the top eight are picked at random, so Refresh brings others.
+    votes = collections.Counter({(h["channel"], h["channel_url"]): 0 for h in reversed(history) if h.get("channel_url")})
+    votes.update(c for c, _ in {((h["channel"], h["channel_url"]), h["when"]) for h in history if h.get("channel_url")})
+    top = [c for c, _ in votes.most_common(8)]
+    sources = [(f"{url}/videos", f"New from {name}", 12, ()) for name, url in random.sample(top, min(4, len(top)))]
+    # Videos like ones you saved, from channels you do not download from yet. Each search starts from a random video
+    # of a random channel in your whole history, so the latest run does not take over.
+    by_channel = collections.defaultdict(list)
+    for h in history:
+        by_channel[h.get("channel")].append(h)
+    for videos in random.sample(list(by_channel.values()), min(3, len(by_channel))):
+        seed = random.choice(videos)
+        sources.append((f"ytsearch15:{seed['title']}", f"Like {seed.get('channel') or seed['title']}", 15, known))
+    with ThreadPoolExecutor(7) as pool:
+        results = list(pool.map(lambda s: (s[1], [e for e in flat(s[0], s[2])
+                                                  if (e.get("channel") or e.get("uploader")) not in s[3]]), sources))
     return pick(results, {h["id"] for h in history})
 
 
@@ -455,6 +483,45 @@ def quit_when_closed():
                 os._exit(0)
 
 
+def check_follows():
+    """Queue what followed channels posted after you followed them: their newest 15 that you do not have yet."""
+    have = have_ids() | {u[-11:] for j in jobs if j["state"] not in ENDED for u in j["urls"]}
+    for f in load_json(FOLLOWS):
+        # no length yet is a premiere or live stream that has not aired.
+        # ponytail: a video that keeps failing (members-only) is tried at every check while it is in the newest 15
+        new = [e["id"] for e in flat(f["url"], 15)
+               if e.get("id") and e.get("duration") and e["id"] not in have and e["id"] not in f["seen"]]
+        if new:
+            add_job([f"https://www.youtube.com/watch?v={i}" for i in new], f"New from {f['title']}", f["max"], f["dir"])
+
+
+def follow_loop():
+    while True:
+        try:
+            check_follows()
+        except Exception as err:  # a broken follows file must not end the checks
+            print("follow check:", err)
+        time.sleep(3 * 3600)
+
+
+def quit_when_idle():
+    """--check: quit once the downloads are done and the page is not open."""
+    while True:
+        time.sleep(10)
+        if all(j["state"] in ENDED for j in jobs) and time.time() - last_seen[0] > 30:
+            os._exit(0)
+
+
+def schedule_checks():
+    """While you follow a channel, Windows starts the app with --check every 3 hours, also when it is closed.
+    Refreshed on every start, so it follows the exe if it moves."""
+    if not getattr(sys, "frozen", False):
+        return
+    task = (["/Create", "/F", "/SC", "HOURLY", "/MO", "3", "/TR", f'"{sys.executable}" --check']
+            if load_json(FOLLOWS) else ["/Delete", "/F"])
+    subprocess.run(["schtasks", *task, "/TN", NAME], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 def add_to_start_menu():
     """Lets the app be found in the Start menu. Refreshed on every start, so it follows the exe if it moves."""
     if not getattr(sys, "frozen", False):
@@ -486,7 +553,8 @@ class Handler(BaseHTTPRequestHandler):
             last_seen[0] = time.time()
             return self.reply({"jobs": [{k: v for k, v in j.items() if k != "urls"} for j in jobs[::-1]],
                                "history": load_history()[::-1][:60], "default_dir": DEFAULT_DIR,
-                               "account": account, "setup": setup})
+                               "account": account, "setup": setup,
+                               "follows": [{k: f[k] for k in ("url", "title", "max")} for f in load_json(FOLLOWS)]})
         if self.path == "/api/suggest":
             return self.reply(suggest())
         self.reply({"error": "Not found"}, 404)
@@ -500,6 +568,22 @@ class Handler(BaseHTTPRequestHandler):
             assert isinstance(body, dict)
         except Exception:
             return self.reply({"error": "Bad request"}, 400)
+        top = body.get("max") if body.get("max") in (2160, 1080, 720) else 2160
+        ids = [i for i in body.get("ids") or [] if isinstance(i, str) and re.fullmatch(r"[\w-]{11}", i)]
+        folder = str(body.get("dir") or DEFAULT_DIR).strip()
+        if self.path == "/api/follow":  # new uploads from this channel download by themselves
+            url = str(body.get("url", ""))
+            if not re.fullmatch(r"https://www\.youtube\.com/channel/[\w-]+/videos", url):
+                return self.reply({"error": "Only a channel can be followed."}, 400)
+            follows = [f for f in load_json(FOLLOWS) if f["url"] != url]  # ids: what is up now, so it is not new
+            follows.append({"url": url, "title": str(body.get("title") or url), "max": top, "dir": folder, "seen": ids})
+            FOLLOWS.write_text(json.dumps(follows, ensure_ascii=False), "utf-8")
+            schedule_checks()
+            return self.reply({})
+        if self.path == "/api/unfollow":
+            FOLLOWS.write_text(json.dumps([f for f in load_json(FOLLOWS) if f["url"] != body.get("url")]), "utf-8")
+            schedule_checks()
+            return self.reply({})
         if self.path == "/api/signin":
             start_sign_in()
             return self.reply(account)
@@ -520,10 +604,7 @@ class Handler(BaseHTTPRequestHandler):
             if not old:
                 return self.reply({"error": "Nothing to retry."}, 400)
             old["retried"] = True
-            job = {"id": uuid.uuid4().hex, "urls": old["failed"], "total": len(old["failed"]), "max": old["max"],
-                   "title": old["title"], "dir": old["dir"], "state": "queued"}
-            jobs.append(job)
-            work.put(job)
+            add_job(old["failed"], old["title"], old["max"], old["dir"])
             return self.reply({})
         if self.path == "/api/stop":  # finishes the episode it is on, then stops
             for job in jobs:
@@ -532,8 +613,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({})
         if self.path != "/api/download":
             return self.reply({"error": "Not found"}, 404)
-        top = body.get("max") if body.get("max") in (2160, 1080, 720) else 2160
-        ids = [i for i in body.get("ids") or [] if isinstance(i, str) and re.fullmatch(r"[\w-]{11}", i)]
         if ids:  # episodes picked from a playlist
             urls, title = [f"https://www.youtube.com/watch?v={i}" for i in ids], str(body.get("title") or "Playlist")
         else:
@@ -545,10 +624,7 @@ class Handler(BaseHTTPRequestHandler):
                 title = next((h["title"] for h in load_history() if h["id"] == vid[1]), None)
                 return self.reply({"have": title or "this video"})
             urls, title = [url], url
-        job = {"id": uuid.uuid4().hex, "urls": urls, "total": len(urls), "max": top, "title": title,
-               "dir": str(body.get("dir") or DEFAULT_DIR).strip(), "state": "queued"}
-        jobs.append(job)
-        work.put(job)
+        job = add_job(urls, title, top, folder)
         self.reply({k: v for k, v in job.items() if k != "urls"})
 
     def log_message(self, *args):
@@ -556,22 +632,30 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    check = "--check" in sys.argv  # the scheduled task: fetch what followed channels posted, then quit
     ThreadingHTTPServer.allow_reuse_address = False  # on Windows, reuse would let a second copy share the port
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    except OSError:  # already running: just show it
-        open_window()
+    except OSError:  # already running: just show it (a scheduled check leaves the work to it)
+        if not check:
+            open_window()
         return
     update_ytdlp()  # only here, past the port check, so a second start never swaps the copy in use
     global yt_dlp
     import yt_dlp
     print("yt-dlp", yt_dlp.version.__version__, "from", yt_dlp.__file__)
     threading.Thread(target=lambda: (install_missing(), worker()), daemon=True).start()
-    if "--no-browser" not in sys.argv:
-        # an app window reports in every second; a normal browser tab can be throttled to once a minute
-        idle_limit[0] = 30 if open_window() else 180
-        threading.Thread(target=quit_when_closed, daemon=True).start()
-        add_to_start_menu()
+    if check:
+        check_follows()
+        threading.Thread(target=quit_when_idle, daemon=True).start()
+    else:
+        threading.Thread(target=follow_loop, daemon=True).start()
+        if "--no-browser" not in sys.argv:
+            # an app window reports in every second; a normal browser tab can be throttled to once a minute
+            idle_limit[0] = 30 if open_window() else 180
+            threading.Thread(target=quit_when_closed, daemon=True).start()
+            add_to_start_menu()
+            schedule_checks()
     server.serve_forever()
 
 

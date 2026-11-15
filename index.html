@@ -18,6 +18,7 @@
     --rule: #B7B9B2;
     --rec: #D7301F;
     --rec-hover: #A3220F;
+    --rec-ink: #B0281A;  /* red text, 4.5:1 on shell and paper */
     --tape: #5A3E2B;    /* magnetic tape */
     --on-rec: #FFFFFF;
     --shadow: rgba(30, 34, 38, 0.28);
@@ -26,7 +27,7 @@
   @media (prefers-color-scheme: dark) {
     :root {
       --shell: #1F2124; --paper: #2A2D31; --ink: #ECEDE8; --pencil: #A6ABB1; --hint: #8C9298;
-      --rule: #3C4045; --rec: #E2412F; --rec-hover: #F0604E; --tape: #C49A78; --shadow: rgba(0, 0, 0, 0.5);
+      --rule: #3C4045; --rec: #C42F1E; --rec-hover: #D33420; --rec-ink: #FF6B57; --tape: #C49A78; --shadow: rgba(0, 0, 0, 0.5);
     }
   }
   * { box-sizing: border-box; }
@@ -72,7 +73,7 @@
   .rec:active { transform: translateY(1px); }
   .rec svg { width: 30px; height: 30px; }
   .hint { margin: 14px 0 0; color: var(--pencil); max-width: 70ch; }
-  .err { margin: 8px 0 0; min-height: 1.5em; color: var(--rec); font-weight: 600; }
+  .err { margin: 8px 0 0; min-height: 1.5em; color: var(--rec-ink); font-weight: 600; }
 
   /* The one moving thing: the record light blinks while something is being taped. */
   body.taping .mark svg { animation: blink 1.6s steps(1) infinite; }
@@ -97,7 +98,7 @@
   .bar { height: 6px; background: var(--paper); border-radius: 3px; overflow: hidden; margin: 8px 0 6px; }
   .bar i { display: block; height: 100%; width: 0; background: var(--tape); transition: width 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
   .job .s { font-size: 0.875rem; color: var(--pencil); font-variant-numeric: tabular-nums; }
-  .job.error .s { color: var(--rec); font-weight: 600; }
+  .job.error .s { color: var(--rec-ink); font-weight: 600; }
   .job.done .bar i { background: var(--ink); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 32px 20px; }
@@ -119,7 +120,7 @@
 
   .tools { display: flex; align-items: center; gap: 12px 28px; flex-wrap: wrap; }
   .account { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; color: var(--pencil); }
-  .account .bad { color: var(--rec); font-weight: 600; }
+  .account .bad { color: var(--rec-ink); font-weight: 600; }
   .warn { margin-top: 32px; padding: 16px 20px; border: 1px solid var(--rec); border-radius: 12px; background: var(--paper); max-width: 75ch; }
   .warn.info { border-color: var(--rule); }
   .warn .bar { margin-bottom: 0; }
@@ -137,13 +138,15 @@
   }
   .pick input:focus, .pick select:focus { border-color: var(--ink); outline: none; }
   .series .size { margin: 20px 0 16px; font-variant-numeric: tabular-nums; }
-  .series .size.bad { color: var(--rec); font-weight: 600; }
+  .series .size.bad { color: var(--rec-ink); font-weight: 600; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; }
   .btn.primary { background: var(--rec); border-color: var(--rec); color: var(--on-rec); }
   .btn.primary:hover:not(:disabled) { background: var(--rec-hover); border-color: var(--rec-hover); color: var(--on-rec); }
   .btn.quiet { border-color: transparent; }
   .btn.small { min-height: 36px; padding: 8px 14px; font-size: 0.875rem; margin-top: 10px; }
   .err.info { color: var(--pencil); font-weight: 500; }
+  #follows-section .empty { margin-bottom: 8px; }
+  .row .btn.small { margin-top: 0; }
   .job:not(.error) .s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .warn code { font: 0.875rem/1.4 var(--mono); background: var(--shell); padding: 2px 6px; border-radius: 4px; user-select: all; }
 
@@ -154,6 +157,8 @@
     .job { grid-template-columns: 84px 1fr; gap: 12px; }
     .row { grid-template-columns: 1fr; }
     .row .q { text-align: left; }
+    .row .btn { justify-self: start; }
+    .actions { display: grid; }  /* one button per row, never a lone one under a pair */
   }
 </style>
 </head>
@@ -197,6 +202,7 @@
       <div class="actions">
         <button class="btn primary" id="s-go" type="button">Download</button>
         <button class="btn" id="s-one" type="button" hidden>Only the video I pasted</button>
+        <button class="btn" id="s-follow" type="button" hidden>Follow new uploads</button>
         <button class="btn quiet" id="s-cancel" type="button">Cancel</button>
       </div>
     </div>
@@ -204,6 +210,12 @@
     <section id="jobs-section" hidden>
       <div class="head"><h2>Downloading</h2><button class="btn" id="stop" type="button" hidden>Stop after this episode</button></div>
       <div id="jobs"></div>
+    </section>
+
+    <section id="follows-section" hidden>
+      <div class="head"><h2>Following</h2></div>
+      <p class="empty">New uploads from these channels download by themselves. The app checks every 3 hours, also while it is closed.</p>
+      <div id="follows"></div>
     </section>
 
     <section>
@@ -276,6 +288,8 @@ async function openSeries(url) {
   $("#s-count").value = series.fresh.length;
   $("#series .pick").hidden = $("#s-go").hidden = !series.fresh.length;
   $("#s-one").hidden = !/[?&]v=/.test(url);
+  const followed = follows.some((f) => f.url === series.follow);
+  Object.assign($("#s-follow"), { hidden: !series.follow, disabled: followed, textContent: followed ? "Following" : "Follow new uploads" });
   panel.classList.remove("loading");
   updateSeries();
   $("#s-count").focus();
@@ -310,6 +324,15 @@ $("#s-go").addEventListener("click", async () => {
 $("#s-one").addEventListener("click", async () => {
   try { await download(series.url); $("#series").hidden = true; $("#url").value = ""; }
   catch (err) { $("#s-size").textContent = err.message; }
+});
+$("#s-follow").addEventListener("click", async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try {
+    await post("/api/follow", { url: series.follow, title: series.channel || series.title, max: Number($("#s-max").value),
+                                dir: folder.value.trim(), ids: series.entries.map((x) => x.id) });
+    b.textContent = "Following";
+  } catch (err) { b.disabled = false; $("#s-size").textContent = err.message; }
 });
 $("#s-cancel").addEventListener("click", () => { $("#series").hidden = true; $("#url").focus(); });
 $("#stop").addEventListener("click", (e) => {
@@ -367,8 +390,14 @@ function jobBar(j) {
   return j.total > 1 && running(j) ? ((j.index || 1) - 1 + one / 100) / j.total * 100 : one;
 }
 
-let lastLib = "", setupBusy = false;
+let lastLib = "", lastFollows = "", follows = [], setupBusy = false;
 const rows = new Map();
+$("#follows").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-unfollow]");
+  if (!b) return;
+  b.disabled = true;
+  post("/api/unfollow", { url: b.dataset.unfollow }).catch((err) => { b.disabled = false; $("#err").textContent = err.message; });
+});
 $("#jobs").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-retry]");
   if (!b) return;
@@ -423,6 +452,18 @@ async function poll() {
     if (row._html !== html) { row._html = html; row.innerHTML = html; row.className = `job ${j.state}`; }
     if ($("#jobs").children[i] !== row) $("#jobs").insertBefore(row, $("#jobs").children[i] || null);
   });
+
+  const followKey = JSON.stringify(state.follows);
+  if (followKey !== lastFollows) {
+    lastFollows = followKey; follows = state.follows;
+    $("#follows-section").hidden = !follows.length;
+    $("#follows").innerHTML = follows.map((f) => `
+      <div class="row">
+        <span class="d">${f.max === 2160 ? "up to 4K" : `up to ${f.max}p`}</span>
+        <span>${esc(f.title)}</span>
+        <button class="btn small" type="button" data-unfollow="${esc(f.url)}">Unfollow</button>
+      </div>`).join("");
+  }
 
   const libKey = JSON.stringify(state.history);
   if (libKey !== lastLib) {

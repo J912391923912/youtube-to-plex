@@ -49,6 +49,12 @@ Paste a playlist or channel link (any channel, like `youtube.com/@CalebHammer`) 
 
 As an example, the 150 most viewed episodes of a 90-minute show come to about 125 GB at 1080p.
 
+## Follow a channel
+
+Paste a channel link and press **Follow new uploads**. From then on, each new video the channel posts downloads by itself, at the quality picked in the panel, into the folder **Saves to** pointed at when you followed. Videos that were already up when you followed are left to you: pick them in the same panel.
+
+The app checks every 3 hours. While it is open it checks by itself; while it is closed, a Windows scheduled task named **YouTube to Plex** starts it in the background (no window), downloads what is new and closes it again. Windows runs that task while you are signed in, so leave the Plex PC signed in. **Following** lists your channels, and **Unfollow** stops one. When you follow none, the scheduled task is removed.
+
 ## Sign in to YouTube
 
 **Sign in to YouTube** opens a separate Chrome or Edge window. You sign in to Google there yourself. The app never sees your password. It saves the YouTube cookies to `%LOCALAPPDATA%\YouTube to Plex\cookies.txt` on your PC and closes the window. **Sign out** deletes them again.
@@ -59,7 +65,12 @@ YouTube can flag accounts that download a lot, so a spare Google account is the 
 
 ## Suggestions
 
-Suggestions come from the newest uploads of the channels you download from most, plus a YouTube search built from the tags of your recent downloads. Videos you already have, Shorts and live streams are left out.
+Suggestions mix two things:
+
+- **New from** a channel you come back to. A channel counts once for each day you download from it, so one big channel run does not take over.
+- **Like** a channel you saved: videos found from a random video in your whole history, not just the latest downloads, and only from channels you do not have yet.
+
+**Refresh** picks again, so it shows different ones. Videos you already have, Shorts and live streams are left out.
 
 ## When downloads start failing
 
